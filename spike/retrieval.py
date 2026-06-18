@@ -1,12 +1,13 @@
 import os
 import logging
-from typing import List
+from typing import List, Dict, Any
 from langchain_core.documents import Document
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
-from spike.config import DATA_FOLDER, CHUNK_SIZE, CHUNK_OVERLAP, OPENAI_API_KEY
+from spike.config import DATA_FOLDER, CHUNK_SIZE, CHUNK_OVERLAP, OPENAI_API_KEY, TOP_K
+
 
 
 # Configure logging for the retrieval module
@@ -135,4 +136,77 @@ def create_embeddings(
     except Exception as e:
         logger.error(f"An error occurred while generating embeddings or initializing ChromaDB: {e}")
         raise e
+
+def retrieve_documents(
+    query: str,
+    vector_store: Chroma = None,
+    persist_directory: str = "chroma_db",
+    embedding_model: str = "text-embedding-3-small",
+    top_k: int = TOP_K
+) -> List[Dict[str, Any]]:
+    """
+    Searches the Chroma vector database and returns the top_k most similar document chunks.
+
+    Args:
+        query (str): The search query.
+        vector_store (Chroma): The active vector store object. If None, it will be loaded from disk.
+        persist_directory (str): Local path where Chroma database is persisted.
+        embedding_model (str): OpenAI embedding model to use for loading the vector store.
+        top_k (int): Number of most similar document chunks to retrieve.
+
+    Returns:
+        List[Dict[str, Any]]: List of dictionaries, each containing:
+                              - 'content' (str): Page content of the chunk.
+                              - 'metadata' (dict): Metadata of the chunk.
+                              - 'source' (str): Basename of the source file.
+                              - 'score' (float): Similarity/distance score.
+    """
+    logger.info(f"Initializing document retrieval for query: '{query}'")
+
+    if not query.strip():
+        logger.warning("Empty search query provided.")
+        return []
+
+    # Load vector store from disk if not provided
+    if vector_store is None:
+        logger.info(f"No active vector store provided. Loading from '{persist_directory}'...")
+        if not os.path.exists(persist_directory):
+            logger.warning(f"Persistence directory '{persist_directory}' does not exist. Cannot retrieve.")
+            return []
+        try:
+            embeddings = OpenAIEmbeddings(
+                model=embedding_model,
+                openai_api_key=OPENAI_API_KEY
+            )
+            vector_store = Chroma(
+                persist_directory=persist_directory,
+                embedding_function=embeddings
+            )
+        except Exception as e:
+            logger.error(f"Failed to load vector store from '{persist_directory}': {e}")
+            return []
+
+    try:
+        # Perform similarity search with score
+        logger.info(f"Performing similarity search (k={top_k})")
+        results_with_scores = vector_store.similarity_search_with_score(query, k=top_k)
+
+        retrieved_results = []
+        for doc, score in results_with_scores:
+            source_path = doc.metadata.get("source", "unknown")
+            source_filename = os.path.basename(source_path)
+
+            retrieved_results.append({
+                "content": doc.page_content,
+                "metadata": doc.metadata,
+                "source": source_filename,
+                "score": score
+            })
+
+        logger.info(f"Successfully retrieved {len(retrieved_results)} document chunks.")
+        return retrieved_results
+    except Exception as e:
+        logger.error(f"An error occurred during retrieval: {e}")
+        return []
+
 
